@@ -24,6 +24,7 @@ export const VAULT_ERROR_CODES = {
   Paused: 14,
   NotPaused: 15,
   RoundEmpty: 16,
+  BadDeployer: 17,
 } as const;
 
 export type VaultErrorName = keyof typeof VAULT_ERROR_CODES;

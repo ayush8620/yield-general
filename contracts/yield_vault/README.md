@@ -7,7 +7,10 @@ This crate contains the Phase 1 core YieldVault contract.
 Implemented in this phase:
 
 - One-time initialization with admin, arbitrary underlying token, name, symbol, and decimals.
-- Initialization guarantee: `initialize` requires the chosen admin's own signature (`admin.require_auth()`). A caller may propose any admin, but only that admin can authorize installing itself, so a front-runner cannot capture a fresh instance with an admin it does not control. Re-initialization still returns `AlreadyInit`. Self-installation by a signer who authorizes themselves remains possible until initialization completes — initialize in the same transaction as creation when that window matters.
+- Initialization guarantees (both apply):
+  1. **Admin auth** — `initialize` requires the chosen admin's signature (`admin.require_auth()` when the admin differs from the deployer). A caller may propose any admin, but only that admin can authorize installing itself.
+  2. **Deployer binding** — the caller passes the `deployer` address and creation `salt`; the contract re-derives its address from that pair and rejects mismatches with `BadDeployer`. The deployer must also authorize. A non-deployer cannot initialize even when self-signing as admin, so the former self-install capture window is closed.
+  Re-initialization still returns `AlreadyInit`. Both deploy scripts generate a salt, create the contract with it, and pass the same salt to `initialize`.
 - Asset deposits with proportional vault-share minting.
 - Share redemption and asset withdrawal.
 - Integer-only accounting with checked arithmetic and explicit floor/ceiling rounding.

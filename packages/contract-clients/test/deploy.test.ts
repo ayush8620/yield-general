@@ -312,6 +312,33 @@ describe('createVaultContract', () => {
     expect(result.contractId).toBe(CONTRACT);
   });
 
+  it('returns the salt it was given', async () => {
+    const server = new StubServer({
+      retvals: [nativeToScVal(CONTRACT, { type: 'address' })],
+    });
+
+    const result = await createVaultContract({
+      ...context(server),
+      wasmHash: WASM_HASH,
+      salt: Buffer.alloc(32, 2),
+    });
+
+    expect(result.salt).toBe('02'.repeat(32));
+  });
+
+  it('generates a salt when none is given', async () => {
+    const server = new StubServer({
+      retvals: [nativeToScVal(CONTRACT, { type: 'address' })],
+    });
+
+    const result = await createVaultContract({
+      ...context(server),
+      wasmHash: WASM_HASH,
+    });
+
+    expect(result.salt).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it('rejects a return value that is not a contract id', async () => {
     const server = new StubServer({
       retvals: [nativeToScVal('not-a-contract', { type: 'string' })],

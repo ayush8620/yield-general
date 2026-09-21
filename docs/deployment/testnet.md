@@ -105,13 +105,15 @@ The deposit side is unaffected: principal is fully backed, and a depositor can a
 withdraw up to what the vault holds.
 
 Beyond the yield simulation, the vault has no NAV source, no oracle, no reserve proof,
-no fees, no per-user withdrawal queue, and no compliance model. `initialize` requires
-the chosen admin's own signature via `admin.require_auth()`: a caller may propose any
-admin address, but only that admin can authorize installing itself, so a front-runner
-cannot take control of a freshly deployed instance with an admin it does not control.
-Self-installation by a caller who signs for themselves is still possible until the
-vault is initialized, so initializing in the same breath as creation — as this
-deployment was — remains good practice.
+no fees, no per-user withdrawal queue, and no compliance model. Current `initialize`
+enforces both guarantees: (1) the chosen admin must authorize via `admin.require_auth()`
+when it differs from the deployer, and (2) the call is bound to the deploying account —
+it takes the deployer address and creation salt, requires the deployer's signature, and
+rejects any pair that does not derive the vault's own address (`BadDeployer`). That
+closes the self-install capture window for new deployments. The already-initialized
+Testnet vault recorded above was built before deployer+salt binding, so its `initialize`
+required only the proposed admin's signature and relied on being initialized in the
+same run as its creation, as it was; it is unaffected by this ABI change.
 
 ## Reproducing
 

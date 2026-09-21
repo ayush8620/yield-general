@@ -51,6 +51,7 @@ import {
   VaultSubmissionError,
 } from './errors.js';
 import { VAULT_METHODS } from './methods.js';
+import { hexToBytes } from './salt.js';
 
 /**
  * Typed client for the Phase 1 `YieldVault` contract.
@@ -326,6 +327,8 @@ export class YieldVaultClient {
     return this.build(
       VAULT_METHODS.initialize,
       [
+        this.addressArg(parsed.deployer),
+        nativeToScVal(hexToBytes(parsed.salt), { type: 'bytes' }),
         this.addressArg(parsed.admin),
         this.addressArg(parsed.asset),
         nativeToScVal(parsed.name, { type: 'string' }),

@@ -167,9 +167,15 @@ echo "════════════════════════�
 echo "  STEP 4: Deploying WASM to Stellar $NETWORK"
 echo "════════════════════════════════════════════════════════════════════"
 
+# The contract address is derived from the deployer and this salt, and
+# `initialize` re-derives it to prove the caller is the deployer, so the same
+# salt must be passed to both steps.
+SALT="${SALT:-$(head -c 32 /dev/urandom | od -An -vtx1 | tr -d ' \n')}"
+
 DEPLOY_OUTPUT="$(stellar contract deploy \
   --wasm "$WASM_OUT" \
   --source "$DEPLOYER_IDENTITY" \
+  --salt "$SALT" \
   "${NET_ARGS[@]}" 2>/tmp/deploy_stderr.log)"
 
 # Portable extraction (-oE rather than -oP): Testnet contract IDs are 56
@@ -197,6 +203,8 @@ stellar contract invoke \
   "${NET_ARGS[@]}" \
   -- \
   initialize \
+  --deployer "$DEPLOYER_ADDRESS" \
+  --salt "$SALT" \
   --admin "$ADMIN_ADDRESS" \
   --asset "$ASSET_CONTRACT_ID" \
   --name "$VAULT_NAME" \

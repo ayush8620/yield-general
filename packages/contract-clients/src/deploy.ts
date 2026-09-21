@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+
 import {
   Account,
   Address,
@@ -79,6 +81,12 @@ export interface CreatedContract {
   /** Transaction hash of the creation. */
   hash: string;
   ledger: number | null;
+  /**
+   * Hex-encoded salt the contract was created with. `initialize` needs it: the
+   * vault proves the caller is the deployer by re-deriving its own address
+   * from the deployer and this salt.
+   */
+  salt: string;
 }
 
 export interface DeployedVault extends CreatedContract {
@@ -302,15 +310,18 @@ export async function createVaultContract(
     );
   }
 
+  const salt =
+    context.salt === undefined
+      ? randomBytes(SALT_LENGTH)
+      : Buffer.from(context.salt);
+
   const { hash, ledger, value } = await submitOperation(
     resolved,
     'create_contract',
     Operation.createCustomContract({
       address: Address.fromString(resolved.source),
       wasmHash,
-      ...(context.salt === undefined
-        ? {}
-        : { salt: Buffer.from(context.salt) }),
+      salt,
     }),
   );
 
@@ -318,6 +329,7 @@ export async function createVaultContract(
     contractId: contractIdSchema.parse(value),
     hash,
     ledger,
+    salt: salt.toString('hex'),
   };
 }
 

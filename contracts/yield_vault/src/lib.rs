@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, Env, String,
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, String,
 };
 
 /// Phase 1 uses a deterministic ledger-time simulation instead of a real
@@ -35,6 +35,7 @@ pub enum VaultError {
     Paused = 14,
     NotPaused = 15,
     RoundEmpty = 16,
+    BadDeployer = 17,
 }
 
 #[contracttype]
@@ -94,19 +95,26 @@ pub struct YieldVault;
 impl YieldVault {
     /// Initialize the vault once with an arbitrary SEP-41-compatible asset.
     ///
-    /// Requires the chosen `admin` to authorize via `admin.require_auth()`. A
-    /// caller may propose any address, but only that address can approve
-    /// installing itself — so a front-runner cannot capture a fresh vault with
-    /// an admin it does not control. Re-initialization still returns
-    /// `AlreadyInit`. Binding a specific deployer at creation time is out of
-    /// scope for this guarantee (self-installation by a caller who signs for
-    /// themselves remains possible until initialization completes).
+    /// Two guarantees apply together:
+    /// 1. **Admin auth** — the chosen `admin` must authorize via
+    ///    `admin.require_auth()` (when it differs from `deployer`).
+    /// 2. **Deployer binding** — `deployer` and `salt` must re-derive this
+    ///    contract's address (`BadDeployer` otherwise), and `deployer` must
+    ///    authorize the call. A caller that did not create the contract cannot
+    ///    initialize it, even when self-signing as admin.
+    ///
+    /// Re-initialization still returns `AlreadyInit`. Order is idempotency,
+    /// deployer binding, auth, then metadata validation — so unauthorized or
+    /// wrongly-bound callers fail before `BadName`/`BadSymbol`/`BadDecimal`.
     ///
     /// Phase 1's simulated yield is deliberately always enabled. This
     /// contract must only be used on Testnet until a production yield source
     /// is designed, implemented, and reviewed in a later phase.
+    #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
+        deployer: Address,
+        salt: BytesN<32>,
         admin: Address,
         asset: Address,
         name: String,
@@ -118,9 +126,25 @@ impl YieldVault {
             return Err(VaultError::AlreadyInit);
         }
 
+        // Only the account that created this contract may initialize it. The
+        // contract address is derived from the deployer address and salt, so a
+        // caller cannot claim a pair that did not create this contract.
+        let derived = env
+            .deployer()
+            .with_address(deployer.clone(), salt)
+            .deployed_address();
+        if derived != env.current_contract_address() {
+            return Err(VaultError::BadDeployer);
+        }
+
         // Auth before metadata validation: reject unauthorized callers before
         // spending work on name/symbol/decimals checks, and before writing.
-        admin.require_auth();
+        // Deployer always authorizes; admin authorizes when distinct (same
+        // address already covered by the deployer check above).
+        deployer.require_auth();
+        if admin != deployer {
+            admin.require_auth();
+        }
 
         if name.is_empty() || name.len() > 32 {
             return Err(VaultError::BadName);
@@ -677,21 +701,39 @@ mod test {
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
         token::StellarAssetClient,
-        Address, Env, String,
+        Address, BytesN, Env, String,
     };
+
+    fn test_salt(env: &Env) -> BytesN<32> {
+        BytesN::from_array(env, &[7; 32])
+    }
+
+    /// Registers the vault at the address a deployer and salt derive, the way
+    /// `create_contract` places a contract on a real network.
+    fn register_derived(env: &Env, deployer: &Address, salt: &BytesN<32>) -> Address {
+        let derived = env
+            .deployer()
+            .with_address(deployer.clone(), salt.clone())
+            .deployed_address();
+        env.register_contract(Some(&derived), YieldVault)
+    }
 
     fn setup() -> (Env, Address, Address, Address, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
+        let deployer = Address::generate(&env);
         let admin = Address::generate(&env);
         let alice = Address::generate(&env);
         let bob = Address::generate(&env);
         let asset = env
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
-        let vault = env.register_contract(None, YieldVault);
+        let salt = test_salt(&env);
+        let vault = register_derived(&env, &deployer, &salt);
         let client = YieldVaultClient::new(&env, &vault);
         client.initialize(
+            &deployer,
+            &salt,
             &admin,
             &asset,
             &String::from_str(&env, "YieldAnchor Vault"),
@@ -727,8 +769,13 @@ mod test {
     fn initialization_validates_metadata_and_is_one_time() {
         let (env, vault, asset, admin, _, _) = setup();
         let client = YieldVaultClient::new(&env, &vault);
+        // AlreadyInit is returned regardless of deployer/salt; pass a valid
+        // shape so the call reaches the idempotency check on an initialized vault.
+        let salt = test_salt(&env);
         assert_eq!(
             client.try_initialize(
+                &admin,
+                &salt,
                 &admin,
                 &asset,
                 &String::from_str(&env, "Other"),
@@ -740,15 +787,19 @@ mod test {
 
         let fresh = Env::default();
         fresh.mock_all_auths();
+        let fresh_deployer = Address::generate(&fresh);
         let fresh_admin = Address::generate(&fresh);
         let fresh_asset = fresh
             .register_stellar_asset_contract_v2(fresh_admin.clone())
             .address();
-        let fresh_vault = fresh.register_contract(None, YieldVault);
+        let fresh_salt = test_salt(&fresh);
+        let fresh_vault = register_derived(&fresh, &fresh_deployer, &fresh_salt);
         let fresh_client = YieldVaultClient::new(&fresh, &fresh_vault);
         assert!(!fresh_client.is_initialized());
         assert_eq!(
             fresh_client.try_initialize(
+                &fresh_deployer,
+                &fresh_salt,
                 &fresh_admin,
                 &fresh_asset,
                 &String::from_str(&fresh, ""),
@@ -759,6 +810,8 @@ mod test {
         );
         assert_eq!(
             fresh_client.try_initialize(
+                &fresh_deployer,
+                &fresh_salt,
                 &fresh_admin,
                 &fresh_asset,
                 &String::from_str(&fresh, "Yield"),
@@ -769,6 +822,8 @@ mod test {
         );
         assert_eq!(
             fresh_client.try_initialize(
+                &fresh_deployer,
+                &fresh_salt,
                 &fresh_admin,
                 &fresh_asset,
                 &String::from_str(&fresh, "Yield"),
@@ -783,6 +838,8 @@ mod test {
         );
         assert_eq!(
             fresh_client.try_initialize(
+                &fresh_deployer,
+                &fresh_salt,
                 &fresh_admin,
                 &fresh_asset,
                 &String::from_str(&fresh, "123456789012345678901234567890123"),
@@ -990,14 +1047,18 @@ mod test {
         assert!(client.try_deposit(&alice, &100).is_err());
 
         let fresh = Env::default();
+        let fresh_deployer = Address::generate(&fresh);
         let fresh_admin = Address::generate(&fresh);
         let fresh_asset = fresh
             .register_stellar_asset_contract_v2(fresh_admin.clone())
             .address();
-        let fresh_vault = fresh.register_contract(None, YieldVault);
+        let fresh_salt = test_salt(&fresh);
+        let fresh_vault = register_derived(&fresh, &fresh_deployer, &fresh_salt);
         let fresh_client = YieldVaultClient::new(&fresh, &fresh_vault);
         assert!(fresh_client
             .try_initialize(
+                &fresh_deployer,
+                &fresh_salt,
                 &fresh_admin,
                 &fresh_asset,
                 &String::from_str(&fresh, "Yield"),
@@ -1007,10 +1068,9 @@ mod test {
             .is_err());
     }
 
-    /// Front-runner holds only their own credentials. Even with a fully
-    /// authorized `initialize` invoke for the attacker address, installing a
-    /// different admin must fail and leave the vault uninitialized. The
-    /// residual honest case: the attacker can only ever install themselves.
+    /// Option 1: front-runner holds only their own credentials. Even with a
+    /// fully authorized `initialize` invoke for the attacker address, installing
+    /// a different admin must fail and leave the vault uninitialized.
     #[test]
     fn initialize_rejects_front_runner_installing_foreign_admin() {
         use soroban_sdk::{
@@ -1019,12 +1079,14 @@ mod test {
         };
 
         let env = Env::default();
+        let deployer = Address::generate(&env);
         let intended_admin = Address::generate(&env);
         let attacker = Address::generate(&env);
         let asset = env
             .register_stellar_asset_contract_v2(intended_admin.clone())
             .address();
-        let vault = env.register_contract(None, YieldVault);
+        let salt = test_salt(&env);
+        let vault = register_derived(&env, &deployer, &salt);
         let client = YieldVaultClient::new(&env, &vault);
         let name = String::from_str(&env, "Yield");
         let symbol = String::from_str(&env, "Y");
@@ -1036,7 +1098,9 @@ mod test {
                 fn_name: "initialize",
                 args: vec![
                     &env,
-                    attacker.into_val(&env),
+                    deployer.into_val(&env),
+                    salt.clone().into_val(&env),
+                    intended_admin.into_val(&env),
                     asset.into_val(&env),
                     name.into_val(&env),
                     symbol.into_val(&env),
@@ -1046,28 +1110,154 @@ mod test {
             },
         }]);
         assert!(client
-            .try_initialize(&intended_admin, &asset, &name, &symbol, &6)
+            .try_initialize(
+                &deployer,
+                &salt,
+                &intended_admin,
+                &asset,
+                &name,
+                &symbol,
+                &6
+            )
             .is_err());
         assert!(!client.is_initialized());
-
-        client.initialize(&attacker, &asset, &name, &symbol, &6);
-        assert!(client.is_initialized());
-        assert_eq!(client.admin(), attacker);
     }
 
-    /// Without admin auth, initialize must fail at require_auth — it must not
-    /// surface a metadata VaultError such as BadName.
+    /// Option 2: a non-deployer cannot initialize even when self-signing as admin.
     #[test]
-    fn initialize_requires_auth_before_metadata_validation() {
+    fn non_deployer_cannot_initialize_even_self_signing_as_admin() {
         let env = Env::default();
+        env.mock_all_auths();
+        let deployer = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let asset = env
+            .register_stellar_asset_contract_v2(attacker.clone())
+            .address();
+        let salt = test_salt(&env);
+        let vault = register_derived(&env, &deployer, &salt);
+        let client = YieldVaultClient::new(&env, &vault);
+
+        assert_eq!(
+            client.try_initialize(
+                &attacker,
+                &salt,
+                &attacker,
+                &asset,
+                &String::from_str(&env, "YieldAnchor Vault"),
+                &String::from_str(&env, "yVAULT"),
+                &6,
+            ),
+            Err(Ok(VaultError::BadDeployer))
+        );
+        assert!(!client.is_initialized());
+    }
+
+    /// Wrong salt or deployer address fails with BadDeployer; happy path still works.
+    #[test]
+    fn initialize_rejects_wrong_salt_or_deployer_and_accepts_real_pair() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let deployer = Address::generate(&env);
+        let attacker = Address::generate(&env);
         let admin = Address::generate(&env);
         let asset = env
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
-        let vault = env.register_contract(None, YieldVault);
+        let salt = test_salt(&env);
+        let vault = register_derived(&env, &deployer, &salt);
+        let client = YieldVaultClient::new(&env, &vault);
+
+        assert_eq!(
+            client.try_initialize(
+                &attacker,
+                &salt,
+                &attacker,
+                &asset,
+                &String::from_str(&env, "YieldAnchor Vault"),
+                &String::from_str(&env, "yVAULT"),
+                &6,
+            ),
+            Err(Ok(VaultError::BadDeployer))
+        );
+        assert_eq!(
+            client.try_initialize(
+                &deployer,
+                &BytesN::from_array(&env, &[9; 32]),
+                &attacker,
+                &asset,
+                &String::from_str(&env, "YieldAnchor Vault"),
+                &String::from_str(&env, "yVAULT"),
+                &6,
+            ),
+            Err(Ok(VaultError::BadDeployer))
+        );
+        assert!(!client.is_initialized());
+
+        client.initialize(
+            &deployer,
+            &salt,
+            &admin,
+            &asset,
+            &String::from_str(&env, "YieldAnchor Vault"),
+            &String::from_str(&env, "yVAULT"),
+            &6,
+        );
+        assert!(client.is_initialized());
+        assert_eq!(client.get_vault_state().admin, admin);
+        assert_eq!(
+            client.try_initialize(
+                &deployer,
+                &salt,
+                &admin,
+                &asset,
+                &String::from_str(&env, "Other"),
+                &String::from_str(&env, "OTHER"),
+                &6,
+            ),
+            Err(Ok(VaultError::AlreadyInit))
+        );
+    }
+
+    #[test]
+    fn the_deployer_may_also_be_the_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let deployer = Address::generate(&env);
+        let asset = env
+            .register_stellar_asset_contract_v2(deployer.clone())
+            .address();
+        let salt = test_salt(&env);
+        let vault = register_derived(&env, &deployer, &salt);
+        let client = YieldVaultClient::new(&env, &vault);
+        client.initialize(
+            &deployer,
+            &salt,
+            &deployer,
+            &asset,
+            &String::from_str(&env, "YieldAnchor Vault"),
+            &String::from_str(&env, "yVAULT"),
+            &6,
+        );
+        assert_eq!(client.get_vault_state().admin, deployer);
+    }
+
+    /// Without auth, initialize must fail at require_auth — it must not
+    /// surface a metadata VaultError such as BadName (auth before metadata).
+    #[test]
+    fn initialize_requires_auth_before_metadata_validation() {
+        let env = Env::default();
+        let deployer = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let asset = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let salt = test_salt(&env);
+        let vault = register_derived(&env, &deployer, &salt);
         let client = YieldVaultClient::new(&env, &vault);
 
         let res = client.try_initialize(
+            &deployer,
+            &salt,
             &admin,
             &asset,
             &String::from_str(&env, ""),
@@ -1082,15 +1272,19 @@ mod test {
     #[test]
     fn initialize_panics_without_admin_auth() {
         let env = Env::default();
+        let deployer = Address::generate(&env);
         let admin = Address::generate(&env);
         let asset = env
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
-        let vault = env.register_contract(None, YieldVault);
+        let salt = test_salt(&env);
+        let vault = register_derived(&env, &deployer, &salt);
         let client = YieldVaultClient::new(&env, &vault);
 
         // No mock_all_auths: require_auth must return a host error.
         let result = client.try_initialize(
+            &deployer,
+            &salt,
             &admin,
             &asset,
             &String::from_str(&env, "YieldAnchor Vault"),

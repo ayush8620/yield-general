@@ -42,8 +42,19 @@ export const vaultMetadataSchema = z.object({
   decimals: decimalsSchema,
 });
 
-/** `initialize(admin, asset, name, symbol, decimals)`. */
+/**
+ * A 32-byte contract-creation salt as 64 hex characters. `initialize` proves
+ * the caller is the deployer by re-deriving the contract address from the
+ * deployer and this salt.
+ */
+const contractSaltSchema = z
+  .string()
+  .regex(/^[0-9a-fA-F]{64}$/, 'Salt must be 32 bytes as 64 hex characters');
+
+/** `initialize(deployer, salt, admin, asset, name, symbol, decimals)`. */
 export const initializeVaultInputSchema = vaultMetadataSchema.extend({
+  deployer: stellarAccountIdSchema,
+  salt: contractSaltSchema,
   admin: stellarAccountIdSchema,
   asset: contractIdSchema,
 });

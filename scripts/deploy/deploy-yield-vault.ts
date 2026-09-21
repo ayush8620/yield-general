@@ -94,6 +94,7 @@ async function main(): Promise<void> {
   console.log(`  upload  : ${deployed.uploadHash}`);
   console.log(`  create  : ${deployed.hash}`);
   console.log(`  contract: ${deployed.contractId}`);
+  console.log(`  salt    : ${deployed.salt}`);
 
   console.log('\n[4/5] initialize');
   const client = new YieldVaultClient({
@@ -112,6 +113,8 @@ async function main(): Promise<void> {
 
   const initialized = await client
     .initialize({
+      deployer: deployer.publicKey(),
+      salt: deployed.salt,
       admin,
       asset,
       name: settings.name,
