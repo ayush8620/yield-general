@@ -1080,7 +1080,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
     fn initialize_panics_without_admin_auth() {
         let env = Env::default();
         let admin = Address::generate(&env);
@@ -1090,13 +1089,15 @@ mod test {
         let vault = env.register_contract(None, YieldVault);
         let client = YieldVaultClient::new(&env, &vault);
 
-        // No mock_all_auths: require_auth must abort.
-        client.initialize(
+        // No mock_all_auths: require_auth must return a host error.
+        let result = client.try_initialize(
             &admin,
             &asset,
             &String::from_str(&env, "YieldAnchor Vault"),
             &String::from_str(&env, "yVAULT"),
             &6,
         );
+        assert!(matches!(result, Err(Err(_))));
+        assert!(!client.is_initialized());
     }
 }
