@@ -94,6 +94,14 @@ pub struct YieldVault;
 impl YieldVault {
     /// Initialize the vault once with an arbitrary SEP-41-compatible asset.
     ///
+    /// Requires the chosen `admin` to authorize via `admin.require_auth()`. A
+    /// caller may propose any address, but only that address can approve
+    /// installing itself — so a front-runner cannot capture a fresh vault with
+    /// an admin it does not control. Re-initialization still returns
+    /// `AlreadyInit`. Binding a specific deployer at creation time is out of
+    /// scope for this guarantee (self-installation by a caller who signs for
+    /// themselves remains possible until initialization completes).
+    ///
     /// Phase 1's simulated yield is deliberately always enabled. This
     /// contract must only be used on Testnet until a production yield source
     /// is designed, implemented, and reviewed in a later phase.
@@ -105,9 +113,15 @@ impl YieldVault {
         symbol: String,
         decimals: u32,
     ) -> Result<(), VaultError> {
+        // Cheap idempotency check first so re-init keeps returning AlreadyInit.
         if env.storage().instance().has(&DataKey::Config) {
             return Err(VaultError::AlreadyInit);
         }
+
+        // Auth before metadata validation: reject unauthorized callers before
+        // spending work on name/symbol/decimals checks, and before writing.
+        admin.require_auth();
+
         if name.is_empty() || name.len() > 32 {
             return Err(VaultError::BadName);
         }
@@ -117,9 +131,6 @@ impl YieldVault {
         if decimals > MAX_DECIMALS {
             return Err(VaultError::BadDecimal);
         }
-
-        // The administrator must authorize assignment of control.
-        admin.require_auth();
 
         let config = Config {
             admin: admin.clone(),
@@ -994,5 +1005,98 @@ mod test {
                 &6,
             )
             .is_err());
+    }
+
+    /// Front-runner holds only their own credentials. Even with a fully
+    /// authorized `initialize` invoke for the attacker address, installing a
+    /// different admin must fail and leave the vault uninitialized. The
+    /// residual honest case: the attacker can only ever install themselves.
+    #[test]
+    fn initialize_rejects_front_runner_installing_foreign_admin() {
+        use soroban_sdk::{
+            testutils::{MockAuth, MockAuthInvoke},
+            vec, IntoVal,
+        };
+
+        let env = Env::default();
+        let intended_admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let asset = env
+            .register_stellar_asset_contract_v2(intended_admin.clone())
+            .address();
+        let vault = env.register_contract(None, YieldVault);
+        let client = YieldVaultClient::new(&env, &vault);
+        let name = String::from_str(&env, "Yield");
+        let symbol = String::from_str(&env, "Y");
+
+        env.mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &vault,
+                fn_name: "initialize",
+                args: vec![
+                    &env,
+                    attacker.into_val(&env),
+                    asset.into_val(&env),
+                    name.into_val(&env),
+                    symbol.into_val(&env),
+                    6u32.into_val(&env),
+                ],
+                sub_invokes: &[],
+            },
+        }]);
+        assert!(client
+            .try_initialize(&intended_admin, &asset, &name, &symbol, &6)
+            .is_err());
+        assert!(!client.is_initialized());
+
+        client.initialize(&attacker, &asset, &name, &symbol, &6);
+        assert!(client.is_initialized());
+        assert_eq!(client.admin(), attacker);
+    }
+
+    /// Without admin auth, initialize must fail at require_auth — it must not
+    /// surface a metadata VaultError such as BadName.
+    #[test]
+    fn initialize_requires_auth_before_metadata_validation() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let asset = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let vault = env.register_contract(None, YieldVault);
+        let client = YieldVaultClient::new(&env, &vault);
+
+        let res = client.try_initialize(
+            &admin,
+            &asset,
+            &String::from_str(&env, ""),
+            &String::from_str(&env, "yVAULT"),
+            &6,
+        );
+        assert!(res.is_err());
+        assert_ne!(res, Err(Ok(VaultError::BadName)));
+        assert!(!client.is_initialized());
+    }
+
+    #[test]
+    #[should_panic]
+    fn initialize_panics_without_admin_auth() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let asset = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let vault = env.register_contract(None, YieldVault);
+        let client = YieldVaultClient::new(&env, &vault);
+
+        // No mock_all_auths: require_auth must abort.
+        client.initialize(
+            &admin,
+            &asset,
+            &String::from_str(&env, "YieldAnchor Vault"),
+            &String::from_str(&env, "yVAULT"),
+            &6,
+        );
     }
 }
